@@ -51,3 +51,7 @@ prisma/*.db-journal
 ehthumbs.db
 Thumbs.db
 desktop.ini
+
+# Project documentation docx files
+*.docx
+
