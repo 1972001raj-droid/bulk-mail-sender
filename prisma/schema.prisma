@@ -1,0 +1,374 @@
+// Prisma Schema matching 05_Backend_Schemas.docx specification
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id         String   @id @default(uuid())
+  email      String   @unique
+  name       String
+  avatarUrl  String?
+  status     String   @default("ACTIVE") // ACTIVE, SUSPENDED, PENDING
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  memberships  OrganizationMember[]
+  oauthAccounts OAuthAccount[]
+  campaignsCreated Campaign[]
+  auditLogs    AuditLog[]
+
+  @@map("users")
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  planId    String   @default("free") // free, pro, enterprise
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members       OrganizationMember[]
+  senders       Sender[]
+  contacts      Contact[]
+  contactLists  ContactList[]
+  templates     Template[]
+  campaigns     Campaign[]
+  sequences     Sequence[]
+  attachments   Attachment[]
+  subscriptions Subscription[]
+  usageCounters UsageCounter[]
+  auditLogs     AuditLog[]
+
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String       @id @default(uuid())
+  organizationId String
+  userId         String
+  role           String       @default("MEMBER") // OWNER, ADMIN, MEMBER, VIEWER
+  status         String       @default("ACTIVE") // ACTIVE, INVITED, REVOKED
+  createdAt      DateTime     @default(now())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@map("organization_members")
+}
+
+model OAuthAccount {
+  id              String    @id @default(uuid())
+  userId          String
+  provider        String    // google, microsoft, zoho
+  providerUserId  String
+  accessTokenEnc  String
+  refreshTokenEnc String?
+  expiresAt       DateTime?
+  scopes          String?
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@map("oauth_accounts")
+}
+
+model Sender {
+  id                String   @id @default(uuid())
+  organizationId    String
+  email             String
+  displayName       String
+  status            String   @default("CONNECTED") // PENDING, CONNECTED, REAUTH_REQUIRED, DISCONNECTED
+  defaultProviderId String?
+  dailyQuota        Int      @default(500)
+  sentToday         Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  organization      Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  providerAccounts  EmailProviderAccount[]
+  campaigns         Campaign[]
+
+  @@unique([organizationId, email])
+  @@map("senders")
+}
+
+model EmailProviderAccount {
+  id                String    @id @default(uuid())
+  senderId          String
+  provider          String    // gmail, microsoft, zoho, sandbox
+  providerAccountId String
+  tokenRef          String?
+  scopes            String?
+  status            String    @default("ACTIVE") // ACTIVE, EXPIRED, REVOKED
+  lastError         String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  sender            Sender    @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, provider])
+  @@map("email_provider_accounts")
+}
+
+model Contact {
+  id               String   @id @default(uuid())
+  organizationId   String
+  email            String
+  firstName        String?
+  lastName         String?
+  company          String?
+  title            String?
+  customFieldsJson String?  // JSON string e.g. {"phone": "+123", "dealSize": "$10k"}
+  status           String   @default("ACTIVE") // ACTIVE, UNSUBSCRIBED, BOUNCED
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  organization     Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  listMemberships  ContactListMember[]
+  campaignRecipients CampaignRecipient[]
+
+  @@unique([organizationId, email])
+  @@map("contacts")
+}
+
+model ContactList {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  description    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members        ContactListMember[]
+  campaigns      Campaign[]
+
+  @@map("contact_lists")
+}
+
+model ContactListMember {
+  listId    String
+  contactId String
+  addedAt   DateTime    @default(now())
+
+  list      ContactList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  contact   Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@id([listId, contactId])
+  @@map("contact_list_members")
+}
+
+model Template {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  subject        String
+  htmlBody       String
+  textBody       String?
+  variablesJson  String?  // JSON array of strings e.g. ["firstName", "company"]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sequenceSteps  SequenceStep[]
+
+  @@map("templates")
+}
+
+model Campaign {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  senderId       String?
+  contactListId  String?
+  sequenceId     String?
+  status         String   @default("DRAFT") // DRAFT, READY, SCHEDULED, RUNNING, PAUSED, COMPLETED, FAILED
+  subject        String?
+  htmlBody       String?
+  textBody       String?
+  timezone       String   @default("UTC")
+  scheduledAt    DateTime?
+  settingsJson   String?  // JSON: tracking: {opens: true, clicks: true}, dailyLimit, etc.
+  createdById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sender         Sender?             @relation(fields: [senderId], references: [id], onDelete: SetNull)
+  contactList    ContactList?        @relation(fields: [contactListId], references: [id], onDelete: SetNull)
+  sequence       Sequence?           @relation(fields: [sequenceId], references: [id], onDelete: SetNull)
+  createdBy      User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  recipients     CampaignRecipient[]
+
+  @@map("campaigns")
+}
+
+model CampaignRecipient {
+  id                  String   @id @default(uuid())
+  campaignId          String
+  contactId           String
+  emailSnapshot       String
+  personalizationJson String?  // JSON rendered values for this contact
+  status              String   @default("PENDING") // PENDING, QUEUED, SENT, OPENED, CLICKED, REPLIED, BOUNCED, FAILED
+  providerMessageId   String?
+  lastError           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  campaign            Campaign              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact             Contact               @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  messages            EmailMessage[]
+  sequenceEnrollment  SequenceEnrollment?
+
+  @@unique([campaignId, contactId])
+  @@map("campaign_recipients")
+}
+
+model EmailMessage {
+  id                  String   @id @default(uuid())
+  campaignRecipientId String
+  provider            String   // gmail, microsoft, zoho, sandbox
+  providerMessageId   String?
+  threadId            String?
+  subject             String
+  bodyRef             String?
+  status              String   @default("QUEUED") // QUEUED, ACCEPTED, SENT, DELIVERED, BOUNCED, FAILED
+  idempotencyKey      String   @unique
+  sentAt              DateTime?
+  createdAt           DateTime @default(now())
+
+  campaignRecipient   CampaignRecipient @relation(fields: [campaignRecipientId], references: [id], onDelete: Cascade)
+  events              EmailEvent[]
+
+  @@map("email_messages")
+}
+
+model EmailEvent {
+  id             String       @id @default(uuid())
+  emailMessageId String
+  eventType      String       // MESSAGE_QUEUED, MESSAGE_SENT, MESSAGE_PROVIDER_ACCEPTED, EMAIL_OPENED, LINK_CLICKED, REPLY_DETECTED, MESSAGE_BOUNCED, MESSAGE_FAILED, UNSUBSCRIBED
+  occurredAt     DateTime     @default(now())
+  metadataJson   String?      // IP, User-Agent, Click URL, Bounce reason
+
+  emailMessage   EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+
+  @@map("email_events")
+}
+
+model Sequence {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  status         String   @default("ACTIVE") // DRAFT, ACTIVE, PAUSED
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  steps          SequenceStep[]
+  campaigns      Campaign[]
+  enrollments    SequenceEnrollment[]
+
+  @@map("sequences")
+}
+
+model SequenceStep {
+  id             String   @id @default(uuid())
+  sequenceId     String
+  stepNo         Int
+  delaySeconds   Int      @default(86400) // Default 24 hours
+  templateId     String?
+  subject        String?
+  htmlBody       String?
+  conditionsJson String?  // JSON: {"stopOnReply": true, "stopOnBounce": true, "stopOnClick": false}
+
+  sequence       Sequence  @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  template       Template? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@unique([sequenceId, stepNo])
+  @@map("sequence_steps")
+}
+
+model SequenceEnrollment {
+  id                  String   @id @default(uuid())
+  sequenceId          String
+  campaignRecipientId String   @unique
+  currentStep         Int      @default(1)
+  status              String   @default("ACTIVE") // ACTIVE, WAITING, STEP_READY, STOPPED, COMPLETED
+  nextRunAt           DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  sequence            Sequence          @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  campaignRecipient   CampaignRecipient @relation(fields: [campaignRecipientId], references: [id], onDelete: Cascade)
+
+  @@map("sequence_enrollments")
+}
+
+model Attachment {
+  id             String   @id @default(uuid())
+  organizationId String
+  objectKey      String
+  filename       String
+  mimeType       String
+  sizeBytes      Int
+  checksum       String?
+  createdAt      DateTime @default(now())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("attachments")
+}
+
+model Subscription {
+  id             String   @id @default(uuid())
+  organizationId String
+  provider       String   // stripe, lemony, etc
+  externalId     String?
+  planId         String   // free, pro, enterprise
+  status         String   @default("ACTIVE") // ACTIVE, PAST_DUE, CANCELLED
+  periodStart    DateTime @default(now())
+  periodEnd      DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+model UsageCounter {
+  id             String   @id @default(uuid())
+  organizationId String
+  metric         String   // emails_sent, contacts_stored, ai_tokens_used
+  periodStart    DateTime
+  periodEnd      DateTime
+  value          Int      @default(0)
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, metric, periodStart])
+  @@map("usage_counters")
+}
+
+model AuditLog {
+  id             String   @id @default(uuid())
+  organizationId String
+  actorUserId    String?
+  action         String   // SENDER_CONNECTED, CAMPAIGN_SENT, ROLE_CHANGED, etc.
+  entityType     String   // sender, campaign, member, etc.
+  entityId       String?
+  metadataJson   String?
+  createdAt      DateTime @default(now())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actorUser      User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@map("audit_logs")
+}
