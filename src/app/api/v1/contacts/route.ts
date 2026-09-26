@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSessionContext } from "@/lib/auth";
+import { verifyEmailAddress, getVerificationExpiryDate } from "@/lib/verification/verifier";
 
 export async function GET(req: NextRequest) {
   try {
@@ -48,28 +49,69 @@ export async function POST(req: NextRequest) {
   try {
     const session = await getSessionContext();
     const body = await req.json();
-    const { email, firstName, lastName, company, title, status, customFields, listId } = body;
+    const {
+      email,
+      firstName,
+      lastName,
+      company,
+      title,
+      status,
+      customFields,
+      listId,
+      verifyEmail,
+      verificationResult,
+      allowInvalid
+    } = body;
 
-    if (!email) {
+    if (!email || !email.trim()) {
       return NextResponse.json({ success: false, error: "Email is required" }, { status: 400 });
     }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Determine verification result:
+    // 1. Use pre-calculated result if client ran manual check
+    // 2. Otherwise auto-verify unless explicitly set to false
+    let verResult = verificationResult;
+    if (!verResult && verifyEmail !== false) {
+      verResult = await verifyEmailAddress(cleanEmail, session.organizationId);
+    }
+
+    // Block invalid/non-existent emails unless user explicitly opted to allow/override
+    if (verResult && verResult.status === "INVALID" && !allowInvalid) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Cannot add invalid email: ${verResult.message || "Mailbox does not exist"}`,
+          verification: verResult
+        },
+        { status: 422 }
+      );
+    }
+
+    const expiresAt = verResult ? getVerificationExpiryDate() : null;
 
     const contact = await prisma.contact.upsert({
       where: {
         organizationId_email: {
           organizationId: session.organizationId,
-          email: email.trim().toLowerCase()
+          email: cleanEmail
         }
       },
       create: {
         organizationId: session.organizationId,
-        email: email.trim().toLowerCase(),
+        email: cleanEmail,
         firstName,
         lastName,
         company,
         title,
         status: status || "ACTIVE",
-        customFieldsJson: customFields ? JSON.stringify(customFields) : null
+        customFieldsJson: customFields ? JSON.stringify(customFields) : null,
+        verificationStatus: verResult ? verResult.status : null,
+        verificationReason: verResult ? verResult.reason : null,
+        verificationCheckedAt: verResult ? new Date(verResult.checkedAt) : null,
+        verificationExpiresAt: expiresAt,
+        verificationMetadata: verResult ? JSON.stringify(verResult) : null
       },
       update: {
         firstName: firstName !== undefined ? firstName : undefined,
@@ -77,7 +119,12 @@ export async function POST(req: NextRequest) {
         company: company !== undefined ? company : undefined,
         title: title !== undefined ? title : undefined,
         status: status !== undefined ? status : undefined,
-        customFieldsJson: customFields !== undefined ? JSON.stringify(customFields) : undefined
+        customFieldsJson: customFields !== undefined ? JSON.stringify(customFields) : undefined,
+        verificationStatus: verResult ? verResult.status : undefined,
+        verificationReason: verResult ? verResult.reason : undefined,
+        verificationCheckedAt: verResult ? new Date(verResult.checkedAt) : undefined,
+        verificationExpiresAt: expiresAt !== null ? expiresAt : undefined,
+        verificationMetadata: verResult ? JSON.stringify(verResult) : undefined
       }
     });
 
@@ -97,7 +144,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ success: true, contact });
+    return NextResponse.json({ success: true, contact, verification: verResult });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }

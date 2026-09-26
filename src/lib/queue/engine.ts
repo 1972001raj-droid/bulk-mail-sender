@@ -1,6 +1,7 @@
 import { prisma } from "../db";
 import { ProviderFactory } from "../providers/factory";
 import { renderPersonalizedText, injectTracking } from "../email/personalization";
+import { createInternetMessageId, createTrackingUrls, extractTrackableUrls } from "../email/tracking";
 import crypto from "crypto";
 
 export interface QueueJobResult {
@@ -115,6 +116,21 @@ export class DeliveryEngine {
     const errors: string[] = [];
 
     for (const r of recipients) {
+      const suppressed = await prisma.suppression.findFirst({
+        where: {
+          organizationId: campaign.organizationId,
+          email: r.emailSnapshot.trim().toLowerCase(),
+        },
+        select: { id: true },
+      });
+      if (suppressed || r.contact.status === "UNSUBSCRIBED") {
+        await prisma.campaignRecipient.update({
+          where: { id: r.id },
+          data: { status: "UNSUBSCRIBED", lastError: "Suppressed before send" },
+        });
+        continue;
+      }
+
       // 1. Deterministic Idempotency Key check
       const idempotencyKey = this.generateIdempotencyKey(campaignId, r.id, 1);
       const existingMessage = await prisma.emailMessage.findUnique({
@@ -153,6 +169,10 @@ export class DeliveryEngine {
           idempotencyKey
         }
       }));
+      const internetMessageId = emailMsg.internetMessageId || createInternetMessageId(sender.email, emailMsg.id);
+      if (!emailMsg.internetMessageId) {
+        await prisma.emailMessage.update({ where: { id: emailMsg.id }, data: { internetMessageId } });
+      }
 
       // Parse campaign settings for tracking
       const settings = campaign.settingsJson ? JSON.parse(campaign.settingsJson) : {};
@@ -160,11 +180,19 @@ export class DeliveryEngine {
       const trackClicks = settings.tracking?.clicks !== false;
 
       // 5. Tracking injection
+      const trackingUrls = await createTrackingUrls({
+        emailMessageId: emailMsg.id,
+        campaignRecipientId: r.id,
+        trackOpens,
+        destinations: trackClicks ? extractTrackableUrls(personalizedBody) : [],
+      });
+
       const finalHtmlBody = injectTracking(personalizedBody, {
-        messageId: emailMsg.id,
+        openTrackingUrl: trackingUrls.openTrackingUrl,
         trackOpens,
         trackClicks,
-        unsubscribeUrl: `${process.env.APP_BASE_URL || "http://localhost:3000"}/api/v1/track/unsub?id=${r.id}`
+        unsubscribeUrl: trackingUrls.unsubscribeUrl,
+        clickTrackingUrls: trackingUrls.clickTrackingUrls,
       });
 
       // 6. Provider Send
@@ -175,7 +203,12 @@ export class DeliveryEngine {
           from: sender.email,
           fromName: sender.displayName,
           subject: personalizedSubject,
-          htmlBody: finalHtmlBody
+          htmlBody: finalHtmlBody,
+          headers: {
+            "List-Unsubscribe": `<${trackingUrls.unsubscribeUrl}>`,
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+            "Message-ID": internetMessageId
+          }
         });
 
         if (sendResult.success) {
@@ -186,6 +219,7 @@ export class DeliveryEngine {
               status: sendResult.providerStatus === "ACCEPTED" ? "ACCEPTED" : "SENT",
               providerMessageId: sendResult.providerMessageId,
               threadId: sendResult.threadId,
+              internetMessageId: sendResult.internetMessageId || internetMessageId,
               sentAt: new Date()
             }
           });
@@ -217,7 +251,7 @@ export class DeliveryEngine {
               create: {
                 sequenceId: campaign.sequenceId,
                 campaignRecipientId: r.id,
-                currentStep: 1,
+                currentStep: 0,
                 status: "ACTIVE",
                 nextRunAt: nextRun
               },
@@ -320,7 +354,15 @@ export class DeliveryEngine {
         campaignRecipient: {
           include: {
             contact: true,
-            campaign: { include: { sender: { include: { providerAccounts: true } } } }
+            campaign: { include: { sender: { include: { providerAccounts: true } } } },
+            messages: {
+              select: {
+                firstOpenedAt: true,
+                firstClickedAt: true,
+                qualifiedOpenCount: true,
+                qualifiedClickCount: true
+              }
+            }
           }
         }
       },
@@ -398,11 +440,24 @@ export class DeliveryEngine {
           idempotencyKey
         }
       });
+      const internetMessageId = createInternetMessageId(sender.email, emailMsg.id);
+      await prisma.emailMessage.update({ where: { id: emailMsg.id }, data: { internetMessageId } });
 
+      const sequenceSettings = recipient.campaign.settingsJson ? JSON.parse(recipient.campaign.settingsJson) : {};
+      const trackOpens = sequenceSettings.tracking?.opens !== false;
+      const trackClicks = sequenceSettings.tracking?.clicks !== false;
+      const trackingUrls = await createTrackingUrls({
+        emailMessageId: emailMsg.id,
+        campaignRecipientId: recipient.id,
+        trackOpens,
+        destinations: trackClicks ? extractTrackableUrls(stepHtml) : [],
+      });
       const finalHtml = injectTracking(stepHtml, {
-        messageId: emailMsg.id,
-        trackOpens: true,
-        trackClicks: true
+        openTrackingUrl: trackingUrls.openTrackingUrl,
+        trackOpens,
+        trackClicks,
+        unsubscribeUrl: trackingUrls.unsubscribeUrl,
+        clickTrackingUrls: trackingUrls.clickTrackingUrls,
       });
 
       const result = await provider.send({
@@ -411,7 +466,12 @@ export class DeliveryEngine {
         from: sender.email,
         fromName: sender.displayName,
         subject: stepSubject,
-        htmlBody: finalHtml
+        htmlBody: finalHtml,
+        headers: {
+          "List-Unsubscribe": `<${trackingUrls.unsubscribeUrl}>`,
+          "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+          "Message-ID": internetMessageId
+        }
       });
 
       if (result.success) {
@@ -420,6 +480,8 @@ export class DeliveryEngine {
           data: {
             status: "SENT",
             providerMessageId: result.providerMessageId,
+            threadId: result.threadId,
+            internetMessageId: result.internetMessageId || internetMessageId,
             sentAt: new Date()
           }
         });

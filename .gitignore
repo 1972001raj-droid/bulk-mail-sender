@@ -55,3 +55,6 @@ desktop.ini
 # Project documentation docx files
 *.docx
 
+# Archives
+*.zip
+

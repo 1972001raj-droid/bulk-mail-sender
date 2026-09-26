@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSessionContext } from "@/lib/auth";
+import { VerificationJobEngine } from "@/lib/verification/job-engine";
 
 export async function POST(req: NextRequest) {
   try {
     const session = await getSessionContext();
     const body = await req.json();
-    const { rows, mappings, listName, listId } = body;
+    const { rows, mappings, listName, listId, verifyEmails } = body;
 
     if (!Array.isArray(rows) || rows.length === 0) {
       return NextResponse.json({ success: false, error: "No rows provided for import" }, { status: 400 });
@@ -27,6 +28,37 @@ export async function POST(req: NextRequest) {
         }
       });
       targetListId = newList.id;
+    }
+
+    // Optional Email Verification Pipeline
+    if (verifyEmails === true) {
+      const job = await prisma.emailVerificationJob.create({
+        data: {
+          organizationId: session.organizationId,
+          status: "PENDING",
+          total: rows.length,
+          targetListId,
+          targetListName: listName,
+          mappingsJson: JSON.stringify(mappings)
+        }
+      });
+
+      // Launch async verification job
+      VerificationJobEngine.startJob(
+        job.id,
+        session.organizationId,
+        rows,
+        mappings,
+        targetListId,
+        listName
+      );
+
+      return NextResponse.json({
+        success: true,
+        jobId: job.id,
+        status: "processing",
+        total: rows.length
+      });
     }
 
     let imported = 0;

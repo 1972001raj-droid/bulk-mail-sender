@@ -78,7 +78,8 @@ export class ResendProviderAdapter implements EmailProvider {
         html: message.htmlBody,
         text: message.textBody || undefined,
         headers: {
-          "X-Entity-Ref-ID": `${Date.now()}`
+          "X-Entity-Ref-ID": `${Date.now()}`,
+          ...(message.headers || {})
         }
       });
 

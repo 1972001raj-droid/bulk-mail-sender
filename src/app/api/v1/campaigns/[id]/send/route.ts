@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSessionContext } from "@/lib/auth";
 import { DeliveryEngine } from "@/lib/queue/engine";
+import { rapidQueueEngine } from "@/lib/queue/rapid-queue";
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   try {
@@ -14,6 +15,23 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       return NextResponse.json({ success: false, error: "Campaign not found" }, { status: 404 });
     }
 
+    // Check Feature Flag for Rapid Email Queue
+    const isRapidQueueEnabled = process.env.RAPID_EMAIL_QUEUE_ENABLED === "true";
+
+    if (isRapidQueueEnabled) {
+      // Execute via Rapid Email Queue layer
+      await rapidQueueEngine.enqueueCampaign(campaign.id);
+      const metrics = await rapidQueueEngine.getStatus(campaign.id);
+
+      return NextResponse.json({
+        success: true,
+        mode: "rapid_queue",
+        status: metrics.status,
+        metrics
+      });
+    }
+
+    // Backward Compatible Fallback: Existing Sending Engine
     if (campaign.status !== "RUNNING") {
       await DeliveryEngine.startCampaign(campaign.id);
     }
@@ -34,6 +52,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
     return NextResponse.json({
       success: true,
+      mode: "legacy_batch",
       status: updatedCampaign?.status,
       batch: batchResult,
       counts
@@ -42,3 +61,4 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
+

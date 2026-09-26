@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSessionContext } from "@/lib/auth";
+import { verifyEmailAddress, getVerificationExpiryDate } from "@/lib/verification/verifier";
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   try {
@@ -28,7 +29,18 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   try {
     const session = await getSessionContext();
     const body = await req.json();
-    const { email, firstName, lastName, company, title, status, customFields, listId } = body;
+    const {
+      email,
+      firstName,
+      lastName,
+      company,
+      title,
+      status,
+      customFields,
+      listId,
+      verifyEmail,
+      verificationResult
+    } = body;
 
     const contact = await prisma.contact.findFirst({
       where: { id: params.id, organizationId: session.organizationId }
@@ -58,6 +70,14 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       }
     }
 
+    // Determine verification state if email changed or verification was triggered
+    let verResult = verificationResult;
+    if (cleanEmail && cleanEmail !== contact.email && !verResult && verifyEmail !== false) {
+      verResult = await verifyEmailAddress(cleanEmail, session.organizationId);
+    }
+
+    const expiresAt = verResult ? getVerificationExpiryDate() : undefined;
+
     const updated = await prisma.contact.update({
       where: { id: params.id },
       data: {
@@ -67,7 +87,12 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         company: company !== undefined ? company : undefined,
         title: title !== undefined ? title : undefined,
         status: status !== undefined ? status : undefined,
-        customFieldsJson: customFields !== undefined ? JSON.stringify(customFields) : undefined
+        customFieldsJson: customFields !== undefined ? JSON.stringify(customFields) : undefined,
+        verificationStatus: verResult ? verResult.status : undefined,
+        verificationReason: verResult ? verResult.reason : undefined,
+        verificationCheckedAt: verResult ? new Date(verResult.checkedAt) : undefined,
+        verificationExpiresAt: expiresAt,
+        verificationMetadata: verResult ? JSON.stringify(verResult) : undefined
       },
       include: {
         listMemberships: {

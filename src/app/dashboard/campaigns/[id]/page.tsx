@@ -22,6 +22,7 @@ import {
   Tag
 } from "lucide-react";
 import { StatCard } from "@/components/ui/StatCard";
+import { RapidQueueDashboard } from "@/components/campaigns/RapidQueueDashboard";
 
 export default function CampaignDetailPage() {
   const params = useParams();
@@ -240,7 +241,15 @@ export default function CampaignDetailPage() {
         />
       </div>
 
+      {/* Rapid Email Queue & High-Throughput Engine Section */}
+      <RapidQueueDashboard
+        campaignId={id}
+        campaignStatus={campaign.status}
+        onRefreshParent={fetchCampaign}
+      />
+
       {/* Tabs & Table */}
+
       <div className="rounded-2xl border border-slate-800 bg-slate-900/40 overflow-hidden shadow-sm">
         {/* Tab Controls */}
         <div className="px-6 py-4 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between">

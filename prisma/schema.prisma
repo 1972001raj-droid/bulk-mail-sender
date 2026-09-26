@@ -44,6 +44,10 @@ model Organization {
   subscriptions Subscription[]
   usageCounters UsageCounter[]
   auditLogs     AuditLog[]
+  verificationJobs EmailVerificationJob[]
+  suppressions     Suppression[]
+  inboundMessages  InboundMessage[]
+  mailboxSubscriptions MailboxSubscription[]
 
   @@map("organizations")
 }
@@ -94,6 +98,8 @@ model Sender {
   organization      Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   providerAccounts  EmailProviderAccount[]
   campaigns         Campaign[]
+  mailboxSubscriptions MailboxSubscription[]
+  inboundMessages   InboundMessage[]
 
   @@unique([organizationId, email])
   @@map("senders")
@@ -127,6 +133,11 @@ model Contact {
   title            String?
   customFieldsJson String?  // JSON string e.g. {"phone": "+123", "dealSize": "$10k"}
   status           String   @default("ACTIVE") // ACTIVE, UNSUBSCRIBED, BOUNCED
+  verificationStatus     String?   // SAFE, RISKY, INVALID, UNKNOWN
+  verificationReason     String?   // SMTP_ACCEPTED, CATCH_ALL, etc.
+  verificationCheckedAt DateTime?
+  verificationExpiresAt DateTime?
+  verificationMetadata  String?   // JSON string with detailed check data
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -206,6 +217,8 @@ model Campaign {
   sequence       Sequence?           @relation(fields: [sequenceId], references: [id], onDelete: SetNull)
   createdBy      User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
   recipients     CampaignRecipient[]
+  queueJobs      EmailQueueJob[]
+  queueConfig    CampaignQueueConfig?
 
   @@map("campaigns")
 }
@@ -225,7 +238,10 @@ model CampaignRecipient {
   campaign            Campaign              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   contact             Contact               @relation(fields: [contactId], references: [id], onDelete: Cascade)
   messages            EmailMessage[]
+  trackingTokens      TrackingToken[]
+  inboundMessages     InboundMessage[]
   sequenceEnrollment  SequenceEnrollment?
+  queueJob            EmailQueueJob?
 
   @@unique([campaignId, contactId])
   @@map("campaign_recipients")
@@ -237,15 +253,24 @@ model EmailMessage {
   provider            String   // gmail, microsoft, zoho, sandbox
   providerMessageId   String?
   threadId            String?
+  internetMessageId   String?
   subject             String
   bodyRef             String?
   status              String   @default("QUEUED") // QUEUED, ACCEPTED, SENT, DELIVERED, BOUNCED, FAILED
   idempotencyKey      String   @unique
   sentAt              DateTime?
+  deliveredAt         DateTime?
+  firstOpenedAt       DateTime?
+  lastOpenedAt        DateTime?
+  qualifiedOpenCount  Int      @default(0)
+  firstClickedAt      DateTime?
+  lastClickedAt       DateTime?
+  qualifiedClickCount Int      @default(0)
   createdAt           DateTime @default(now())
 
   campaignRecipient   CampaignRecipient @relation(fields: [campaignRecipientId], references: [id], onDelete: Cascade)
   events              EmailEvent[]
+  trackingTokens      TrackingToken[]
 
   @@map("email_messages")
 }
@@ -256,10 +281,98 @@ model EmailEvent {
   eventType      String       // MESSAGE_QUEUED, MESSAGE_SENT, MESSAGE_PROVIDER_ACCEPTED, EMAIL_OPENED, LINK_CLICKED, REPLY_DETECTED, MESSAGE_BOUNCED, MESSAGE_FAILED, UNSUBSCRIBED
   occurredAt     DateTime     @default(now())
   metadataJson   String?      // IP, User-Agent, Click URL, Bounce reason
+  source         String       @default("APPLICATION") // PIXEL, GMAIL, MICROSOFT, RESEND, SMTP
+  quality        String       @default("QUALIFIED") // QUALIFIED, PREFETCH, BOT, UNKNOWN
+  providerEventId String?
+  dedupeKey      String?      @unique
 
   emailMessage   EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
 
   @@map("email_events")
+}
+
+model TrackingToken {
+  id                  String   @id @default(uuid())
+  tokenHash           String   @unique
+  purpose             String   // OPEN, CLICK, UNSUBSCRIBE
+  emailMessageId      String?
+  campaignRecipientId String
+  destinationUrl      String?
+  expiresAt           DateTime?
+  revokedAt           DateTime?
+  createdAt           DateTime @default(now())
+
+  emailMessage        EmailMessage?      @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+  campaignRecipient   CampaignRecipient  @relation(fields: [campaignRecipientId], references: [id], onDelete: Cascade)
+
+  @@index([campaignRecipientId, purpose])
+  @@index([emailMessageId, purpose])
+  @@map("tracking_tokens")
+}
+
+model Suppression {
+  id             String   @id @default(uuid())
+  organizationId String
+  email          String
+  scope          String   @default("MARKETING") // MARKETING, ALL
+  reason         String   // UNSUBSCRIBED, BOUNCED, COMPLAINT, MANUAL
+  source         String   @default("APPLICATION")
+  createdAt      DateTime @default(now())
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, email, scope])
+  @@index([organizationId, email])
+  @@map("suppressions")
+}
+
+model MailboxSubscription {
+  id             String   @id @default(uuid())
+  organizationId String
+  senderId       String
+  provider       String   // gmail, microsoft, resend, smtp
+  remoteId       String?
+  cursor         String?
+  clientStateHash String?
+  expiresAt      DateTime?
+  lastSyncedAt   DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sender         Sender       @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, provider])
+  @@index([expiresAt])
+  @@map("mailbox_subscriptions")
+}
+
+model InboundMessage {
+  id                  String   @id @default(uuid())
+  organizationId      String
+  senderId            String
+  campaignRecipientId String?
+  provider            String
+  providerMessageId   String
+  providerThreadId    String?
+  internetMessageId   String?
+  inReplyTo           String?
+  referencesJson      String?
+  fromEmail           String
+  subject             String?
+  snippet             String?
+  classification      String   @default("UNKNOWN") // HUMAN, OUT_OF_OFFICE, AUTO_REPLY, BOUNCE, UNKNOWN
+  receivedAt          DateTime
+  createdAt           DateTime @default(now())
+
+  organization        Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sender              Sender             @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  campaignRecipient   CampaignRecipient? @relation(fields: [campaignRecipientId], references: [id], onDelete: SetNull)
+
+  @@unique([senderId, provider, providerMessageId])
+  @@index([campaignRecipientId, receivedAt])
+  @@index([organizationId, receivedAt])
+  @@map("inbound_messages")
 }
 
 model Sequence {
@@ -302,6 +415,10 @@ model SequenceEnrollment {
   currentStep         Int      @default(1)
   status              String   @default("ACTIVE") // ACTIVE, WAITING, STEP_READY, STOPPED, COMPLETED
   nextRunAt           DateTime?
+  branchKey           String?  // OPENED_NO_REPLY, NO_QUALIFIED_OPEN, CLICKED
+  lastQualifiedEventAt DateTime?
+  stopReason          String?
+  conditionVersion    Int      @default(1)
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -372,3 +489,126 @@ model AuditLog {
 
   @@map("audit_logs")
 }
+
+model EmailVerificationJob {
+  id             String   @id @default(uuid())
+  organizationId String
+  status         String   @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  total          Int      @default(0)
+  processed      Int      @default(0)
+  safeCount      Int      @default(0)
+  riskyCount     Int      @default(0)
+  invalidCount   Int      @default(0)
+  unknownCount   Int      @default(0)
+  targetListId   String?
+  targetListName String?
+  mappingsJson   String?  // JSON string of CSV mappings
+  error          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  records        EmailVerificationRecord[]
+
+  @@index([organizationId])
+  @@map("email_verification_jobs")
+}
+
+model EmailVerificationRecord {
+  id          String   @id @default(uuid())
+  jobId       String
+  email       String
+  status      String   // SAFE, RISKY, INVALID, UNKNOWN
+  reason      String   // SMTP_ACCEPTED, CATCH_ALL, MAILBOX_NOT_FOUND, etc.
+  detailsJson String?  // JSON string
+  rawRowJson  String?  // JSON string of original CSV row
+  createdAt   DateTime @default(now())
+
+  job         EmailVerificationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@index([email])
+  @@map("email_verification_records")
+}
+
+model EmailDomainCache {
+  domain        String   @id
+  mxRecordsJson String   // JSON array of MX records
+  hasMx         Boolean  @default(false)
+  isCatchAll    Boolean  @default(false)
+  checkedAt     DateTime @default(now())
+  expiresAt     DateTime
+
+  @@map("email_domain_cache")
+}
+
+model EmailQueueJob {
+  id                  String   @id @default(uuid())
+  campaignId          String
+  campaignRecipientId String   @unique
+  contactId           String
+  senderAccountId     String?
+  recipientEmail      String
+  recipientDomain     String
+
+  status              String   @default("QUEUED") // PENDING, QUEUED, PROCESSING, SENT, RETRYING, FAILED, CANCELLED
+  priority            String   @default("NORMAL") // HIGH, NORMAL, LOW
+
+  attemptCount        Int      @default(0)
+  maxAttempts         Int      @default(5)
+
+  availableAt         DateTime @default(now())
+  scheduledAt         DateTime?
+  lastAttemptAt       DateTime?
+  nextRetryAt         DateTime?
+
+  lockedAt            DateTime?
+  lockedBy            String?  // Worker ID identifier (e.g. "worker-1")
+
+  provider            String?
+  providerMessageId   String?
+
+  errorCode           String?
+  errorMessage        String?
+  errorClassification String?  // TEMPORARY, PERMANENT
+
+  sentAt              DateTime?
+  failedAt            DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  campaign            Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaignRecipient   CampaignRecipient @relation(fields: [campaignRecipientId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
+  @@index([status, availableAt, priority])
+  @@index([lockedAt])
+  @@index([recipientDomain])
+  @@index([nextRetryAt])
+  @@map("email_queue_jobs")
+}
+
+model CampaignQueueConfig {
+  id                        String   @id @default(uuid())
+  campaignId                String   @unique
+  workerCount               Int      @default(4)
+  emailsPerWorkerPerSecond  Float    @default(20)
+  globalRateLimit           Float    @default(80)
+  maxConcurrentJobs         Int      @default(20)
+  batchSize                 Int      @default(500)
+  maxRetries                Int      @default(5)
+  initialRetryDelaySeconds  Int      @default(30)
+  retryBackoffMultiplier    Float    @default(2.0)
+  maxRetryDelaySeconds      Int      @default(900)
+  perDomainThrottlingEnabled Boolean @default(true)
+  domainRateLimitsJson      String?  // JSON e.g. {"gmail.com": 10, "yahoo.com": 5, "outlook.com": 8}
+  staleLockTimeoutSeconds   Int      @default(60)
+  queuePriority             String   @default("NORMAL")
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  campaign                  Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@map("campaign_queue_configs")
+}
+

@@ -65,25 +65,31 @@ export function renderPersonalizedText(template: string, data: RecipientData): s
 export function injectTracking(
   htmlBody: string,
   tracking: {
-    messageId: string;
-    trackingDomain?: string;
+    openTrackingUrl?: string;
     trackOpens?: boolean;
     trackClicks?: boolean;
     unsubscribeUrl?: string;
+    clickTrackingUrls?: Map<string, string>;
   }
 ): string {
   let content = htmlBody || "";
-  const baseUrl = tracking.trackingDomain || process.env.APP_BASE_URL || "http://localhost:3000";
 
   // Wrap href links for click tracking if enabled
-  if (tracking.trackClicks) {
+  if (tracking.trackClicks && tracking.clickTrackingUrls) {
     content = content.replace(/<a\s+(?:[^>]*?\s+)?href=(["'])(.*?)\1/gi, (match, quote, originalUrl) => {
-      // Don't wrap mailto or anchor or tracking urls
+      // Don't wrap mailto, anchors, or an unrecognized destination.
       if (originalUrl.startsWith("mailto:") || originalUrl.startsWith("#") || originalUrl.includes("/api/v1/track/")) {
         return match;
       }
-      const encodedUrl = encodeURIComponent(originalUrl);
-      const trackedUrl = `${baseUrl}/api/v1/track/click?msgId=${tracking.messageId}&target=${encodedUrl}`;
+
+      let normalizedUrl: string;
+      try {
+        normalizedUrl = new URL(originalUrl).toString();
+      } catch {
+        return match;
+      }
+      const trackedUrl = tracking.clickTrackingUrls?.get(normalizedUrl);
+      if (!trackedUrl) return match;
       return match.replace(originalUrl, trackedUrl);
     });
   }
@@ -95,9 +101,8 @@ export function injectTracking(
   }
 
   // Inject 1x1 transparent tracking pixel
-  if (tracking.trackOpens) {
-    const pixelUrl = `${baseUrl}/api/v1/track/open?msgId=${tracking.messageId}&t=${Date.now()}`;
-    const pixelTag = `<img src="${pixelUrl}" width="1" height="1" alt="" style="display:none !important; width:1px; height:1px; border:0;" />`;
+  if (tracking.trackOpens && tracking.openTrackingUrl) {
+    const pixelTag = `<img src="${tracking.openTrackingUrl}" width="1" height="1" alt="" style="display:none !important; width:1px; height:1px; border:0;" />`;
     if (content.includes("</body>")) {
       content = content.replace("</body>", `${pixelTag}</body>`);
     } else {

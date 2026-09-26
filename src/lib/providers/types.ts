@@ -37,6 +37,7 @@ export interface ProviderSendResult {
   success: boolean;
   providerMessageId: string;
   threadId?: string;
+  internetMessageId?: string;
   providerStatus: "ACCEPTED" | "SENT" | "REJECTED" | "THROTTLED";
   rawResponse?: any;
   error?: string;

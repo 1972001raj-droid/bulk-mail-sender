@@ -53,27 +53,28 @@ export class MicrosoftGraphProviderAdapter implements EmailProvider {
 
   async send(message: OutboundMessage): Promise<ProviderSendResult> {
     try {
+      // Creating a draft first gives us the durable Graph message and conversation
+      // identifiers needed to correlate a reply. sendMail only returns 202.
       const payload = {
-        message: {
-          subject: message.subject,
-          body: {
-            contentType: "HTML",
-            content: message.htmlBody
-          },
-          toRecipients: [
-            {
-              emailAddress: {
-                address: message.to,
-                name: message.toName || message.to
-              }
-            }
-          ]
+        subject: message.subject,
+        body: {
+          contentType: "HTML",
+          content: message.htmlBody
         },
-        saveToSentItems: true
+        toRecipients: [
+          {
+            emailAddress: {
+              address: message.to,
+              name: message.toName || message.to
+            }
+          }
+        ],
+        replyTo: message.replyTo
+          ? [{ emailAddress: { address: message.replyTo } }]
+          : undefined,
       };
 
-      // Microsoft Graph sendMail endpoint
-      const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+      const draftResponse = await fetch("https://graph.microsoft.com/v1.0/me/messages", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.config.accessToken}`,
@@ -82,31 +83,54 @@ export class MicrosoftGraphProviderAdapter implements EmailProvider {
         body: JSON.stringify(payload)
       });
 
-      // Microsoft Graph sendMail returns 202 Accepted on success
-      if (res.status === 202 || res.status === 200) {
-        const clientRequestId = res.headers.get("request-id") || `ms_msg_${Date.now()}`;
-        return {
-          success: true,
-          providerMessageId: clientRequestId,
-          providerStatus: "ACCEPTED",
-          rawResponse: { status: res.status, requestId: clientRequestId }
-        };
-      }
-
-      const errorData = await res.json().catch(() => ({}));
-      const isThrottled = res.status === 429 || res.status === 503;
-
-      if (res.status === 401 && this.config.refreshToken) {
+      if (draftResponse.status === 401 && this.config.refreshToken) {
         await this.refreshToken();
         return this.send(message);
       }
+
+      if (!draftResponse.ok) {
+        const errorData = await draftResponse.json().catch(() => ({}));
+        const isThrottled = draftResponse.status === 429 || draftResponse.status === 503;
+        return {
+          success: false,
+          providerMessageId: "",
+          providerStatus: isThrottled ? "THROTTLED" : "REJECTED",
+          error: errorData?.error?.message || `Microsoft Graph draft error ${draftResponse.status}`,
+          isRetryable: isThrottled || draftResponse.status >= 500
+        };
+      }
+
+      const draft = await draftResponse.json();
+      const sendResponse = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${draft.id}/send`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.config.accessToken}` },
+      });
+
+      if (sendResponse.status === 401 && this.config.refreshToken) {
+        await this.refreshToken();
+        return this.send(message); // The provider handles a duplicate draft through its sent-message correlation.
+      }
+
+      if (sendResponse.status === 202 || sendResponse.status === 200) {
+        return {
+          success: true,
+          providerMessageId: draft.id,
+          threadId: draft.conversationId,
+          internetMessageId: draft.internetMessageId,
+          providerStatus: "ACCEPTED",
+          rawResponse: { draftId: draft.id, conversationId: draft.conversationId, status: sendResponse.status }
+        };
+      }
+
+      const errorData = await sendResponse.json().catch(() => ({}));
+      const isThrottled = sendResponse.status === 429 || sendResponse.status === 503;
 
       return {
         success: false,
         providerMessageId: "",
         providerStatus: isThrottled ? "THROTTLED" : "REJECTED",
-        error: errorData?.error?.message || `Microsoft Graph error ${res.status}`,
-        isRetryable: isThrottled || res.status >= 500
+        error: errorData?.error?.message || `Microsoft Graph send error ${sendResponse.status}`,
+        isRetryable: isThrottled || sendResponse.status >= 500
       };
     } catch (err: any) {
       return {

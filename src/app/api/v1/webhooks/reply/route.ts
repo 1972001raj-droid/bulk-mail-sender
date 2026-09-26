@@ -1,64 +1,51 @@
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
 import { prisma } from "@/lib/db";
+import { ingestInboundEmail } from "@/lib/email/inbound";
+
+function hasValidSecret(req: NextRequest): boolean {
+  const configured = process.env.REPLY_WEBHOOK_SECRET;
+  if (!configured) return process.env.NODE_ENV !== "production";
+  const provided = req.headers.get("x-reply-webhook-secret") || "";
+  if (provided.length !== configured.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(configured));
+}
 
 export async function POST(req: NextRequest) {
   try {
+    if (!hasValidSecret(req)) {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await req.json();
-    const { recipientId, email, replySnippet } = body;
-
-    let targetRecipient;
-    if (recipientId) {
-      targetRecipient = await prisma.campaignRecipient.findUnique({
-        where: { id: recipientId },
-        include: {
-          messages: { take: 1, orderBy: { createdAt: "desc" } }
-        }
-      });
-    } else if (email) {
-      targetRecipient = await prisma.campaignRecipient.findFirst({
-        where: { emailSnapshot: email.toLowerCase() },
-        include: {
-          messages: { take: 1, orderBy: { createdAt: "desc" } }
-        },
-        orderBy: { createdAt: "desc" }
-      });
+    const senderId = String(body.senderId || "");
+    const providerMessageId = String(body.providerMessageId || "");
+    const fromEmail = String(body.fromEmail || "").trim().toLowerCase();
+    if (!senderId || !providerMessageId || !fromEmail) {
+      return NextResponse.json({ success: false, error: "senderId, providerMessageId, and fromEmail are required" }, { status: 400 });
     }
 
-    if (!targetRecipient) {
-      return NextResponse.json({ success: false, error: "Recipient not found" }, { status: 404 });
-    }
+    const sender = await prisma.sender.findUnique({ where: { id: senderId }, select: { organizationId: true } });
+    if (!sender) return NextResponse.json({ success: false, error: "Sender not found" }, { status: 404 });
 
-    // 1. Mark recipient as REPLIED
-    await prisma.campaignRecipient.update({
-      where: { id: targetRecipient.id },
-      data: { status: "REPLIED" }
+    const result = await ingestInboundEmail({
+      organizationId: sender.organizationId,
+      senderId,
+      provider: String(body.provider || "smtp").toLowerCase(),
+      providerMessageId,
+      providerThreadId: body.providerThreadId ? String(body.providerThreadId) : null,
+      internetMessageId: body.internetMessageId ? String(body.internetMessageId) : null,
+      inReplyTo: body.inReplyTo ? String(body.inReplyTo) : null,
+      references: Array.isArray(body.references) ? body.references.map(String).slice(0, 20) : [],
+      fromEmail,
+      subject: body.subject ? String(body.subject).slice(0, 500) : null,
+      snippet: body.snippet ? String(body.snippet).slice(0, 500) : null,
+      receivedAt: body.receivedAt ? new Date(body.receivedAt) : new Date(),
     });
-
-    // 2. Stop follow-up sequence immediately (Document 03 Section 8)
-    await prisma.sequenceEnrollment.updateMany({
-      where: { campaignRecipientId: targetRecipient.id },
-      data: { status: "STOPPED" }
-    });
-
-    // 3. Record REPLY_DETECTED event
-    if (targetRecipient.messages[0]) {
-      await prisma.emailEvent.create({
-        data: {
-          emailMessageId: targetRecipient.messages[0].id,
-          eventType: "REPLY_DETECTED",
-          metadataJson: JSON.stringify({
-            snippet: replySnippet || "Interested in learning more, thanks!",
-            detectedAt: new Date().toISOString()
-          })
-        }
-      });
-    }
 
     return NextResponse.json({
       success: true,
-      recipientId: targetRecipient.id,
-      status: "REPLIED",
-      sequenceStatus: "STOPPED"
+      ...result,
     });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });

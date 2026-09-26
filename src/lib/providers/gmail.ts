@@ -55,11 +55,15 @@ export class GmailProviderAdapter implements EmailProvider {
    * Encodes standard RFC 2822 email to Base64URL required by Gmail API
    */
   private createRfc2822Raw(message: OutboundMessage): string {
+    const headerLines = Object.entries(message.headers || {})
+      .filter(([name, value]) => /^[A-Za-z0-9-]+$/.test(name) && !/[\r\n]/.test(value))
+      .map(([name, value]) => `${name}: ${value}`);
     const lines = [
       `To: ${message.toName ? `"${message.toName}" <${message.to}>` : message.to}`,
       `From: ${message.fromName ? `"${message.fromName}" <${message.from}>` : message.from}`,
       message.replyTo ? `Reply-To: ${message.replyTo}` : "",
       `Subject: =?UTF-8?B?${Buffer.from(message.subject, "utf-8").toString("base64")}?=`,
+      ...headerLines,
       "MIME-Version: 1.0",
       "Content-Type: text/html; charset=UTF-8",
       "Content-Transfer-Encoding: 7bit",

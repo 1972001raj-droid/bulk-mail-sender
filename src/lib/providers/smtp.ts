@@ -94,16 +94,18 @@ export class SmtpProviderAdapter implements EmailProvider {
         text: message.textBody || undefined,
         headers: {
           "X-Mailer": "AeroSend Outreach Engine",
-          "X-Entity-Ref-ID": `${Date.now()}`
-        }
+          "X-Entity-Ref-ID": `${Date.now()}`,
+          ...(message.headers || {})
+        },
+        messageId: message.headers?.["Message-ID"]
       });
 
-      const messageId = info.messageId || `smtp_${Date.now()}`;
+      const messageId = info.messageId || message.headers?.["Message-ID"] || `smtp_${Date.now()}`;
 
       return {
         success: true,
         providerMessageId: messageId,
-        threadId: `thd_${messageId}`,
+        threadId: messageId,
         providerStatus: "SENT",
         rawResponse: {
           messageId: info.messageId,
